@@ -76,12 +76,5 @@ Launch "test.py" to test the network. Modify the parameters in the test_options 
 "latest_net_G" to go from images (MRI) to labels (SPECT). Do the same with latest_net_GB to go in the opposite direction.
 
 *******************************************************************************
-### Tips:
-- Use and modify "check_loader_patches.py" to check the loader, try augmentations functions, padding, etc. and see and the patches fed during training. 
-- Adapt "Organize_folder_structure.py" depending on you trainig data, before starting the training. Check on 3DSlicer or ITKSnap if your data are correctly pre-processed and have same origin and size.
-- I noticed that ResNet works better for image translation and with MSEloss for the Discriminator. The difference is made by the ResNet modules. So you could write also a Unet, with ResNet layers. You can pick different networks from the Base_options. 
-- To have more accurate results it's necessary to have many epochs (200 minimum in my experience). I am trying also different losses for the generator (Correlation Coefficient like in https://github.com/gyhandy/Unpaired_MR_to_CT_Image_Synthesis) 
-to set a shape constrain between the starting/generated and label image. The loss to be modified in cycle_gan_model.py.  
-- We have a Nvidia-Tesla v100 available: in case you have no computational power you can reduce the image size by resampling the data and set a batch_size of 1.
 
 
