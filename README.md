@@ -61,10 +61,7 @@ Data structure after running it:
 	|   |   |   ├── 0.nii             
 	|   |   |   └── 1.nii
 	
-To make the training work it is necessary that the train images and labels have same matrix size and same origin/direction, because the program extracts image patches with the
-SimpleITK functions (or take the all image if you set the same size). Also the augmentations are done with SimpleITK. By using the IXI-brain-Dataset, I registered all data to
-a reference image with a registration script (Applied first Sobel and then affine registration) in organize_folder_structure.py. It's not necessary that all source and target 
-images are perfectly overlaid, the network will learn anyway the distributions if the patch_size is large to have enough spatial information.
+To make the training work it is necessary that the train images and labels have same matrix size and same origin/direction, because the program extracts image patches with the SimpleITK functions (or take the all image if you set the same size). 
 *******************************************************************************
 ### Training:
 - Modify the options to set the parameters and start the training/testing on the data. Read the descriptions for each parameter.
