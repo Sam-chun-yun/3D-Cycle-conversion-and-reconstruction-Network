@@ -28,16 +28,16 @@ Additional packages can be installed with "pip install -r requirements.txt"
 
 Use first "organize_folder_structure.py" to create organize the data.
 Modify the input parameters to select the two folders: images and labels folders with the dataset.
-(Example, I want to obtain T2 from T1 brain images)
+(Example, I want to obtain SPECT from MRI brain images)
 
 
     .
 	├── Data_folder                   
-	|   ├── T1_Brain               
+	|   ├── MRI_Brain               
 	|   |   ├── image1.nii 
     |   |   ├── image2.nii 	
 	|   |   └── image3.nii                     
-	|   ├── T2_Brain                        
+	|   ├── SPECT_Brain                        
 	|   |   ├── image1.nii 
     |   |   ├── image2.nii 	
 	|   |   └── image3.nii  
