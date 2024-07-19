@@ -5,10 +5,11 @@ from .base_model import BaseModel
 from . import networks3D
 
 scaler = torch.cuda.amp.GradScaler()
-import numpy as np
+import math
 
-from skimage.metrics import peak_signal_noise_ratio as PSNR
-from skimage.metrics import structural_similarity as SSIM
+from torchmetrics import StructuralSimilarityIndexMeasure
+
+
 class ImagePool():
     def __init__(self, pool_size):
         self.pool_size = pool_size
@@ -39,6 +40,35 @@ class ImagePool():
         return return_images
 
 
+def non_zero_mean(tensor):
+    non_zero_elements = torch.masked_select(tensor, tensor != 0)
+    mean_value = torch.mean(non_zero_elements)
+    return mean_value.item() if mean_value.numel() > 0 else 0  # Return 0 if tensor has no non-zero elements
+
+
+def calculate_sbr(input_tensor):
+    min_val = torch.min(input_tensor)
+    max_val = torch.max(input_tensor)
+    input_tensor = (input_tensor - min_val) / (max_val - min_val)
+
+    batch_size = input_tensor.size(0)
+    sbr_values = torch.zeros(batch_size)
+    for i in range(batch_size):
+        batch_tensor = input_tensor[i]
+        threshold = torch.mean(batch_tensor) + (torch.std(batch_tensor) * 2.5)
+        separated_tensor = torch.where(batch_tensor <= threshold, torch.zeros_like(batch_tensor), batch_tensor)
+        complement_tensor = torch.where(batch_tensor > threshold, torch.zeros_like(batch_tensor), batch_tensor)
+        separated_mean = non_zero_mean(separated_tensor)
+        complement_mean = non_zero_mean(complement_tensor)
+        if complement_mean == 0.0:
+            complement_mean = 0.1
+
+        sbr_values[i] = (separated_mean - complement_mean) / complement_mean
+        if math.isnan(sbr_values[i]):
+            sbr_values[i] = 0
+    return sbr_values
+
+
 class CycleGANModel(BaseModel):
     def name(self):
         return 'CycleGANModel'
@@ -48,13 +78,14 @@ class CycleGANModel(BaseModel):
         # default CycleGAN did not use dropout
         parser.set_defaults(no_dropout=True)
         if is_train:
-            parser.add_argument('--lambda_A', type=float, default=5.0, help='weight for cycle loss (A -> B -> A)')
-            parser.add_argument('--lambda_B', type=float, default=5.0,
+            parser.add_argument('--lambda_A', type=float, default=10.0, help='weight for cycle loss (A -> B -> A)')
+            parser.add_argument('--lambda_B', type=float, default=10.0,
                                 help='weight for cycle loss (B -> A -> B)')
-            parser.add_argument('--lambda_identity', type=float, default=0.5, help='use identity mapping. Setting lambda_identity other than 0 has an effect of '
-                                                                                   'scaling the weight of the identity mapping loss. For example, if the weight of the'
-                                                                                   ' identity loss should be 10 times smaller than the weight of the reconstruction loss, '
-                                                                                   'please set lambda_identity = 0.1')
+            parser.add_argument('--lambda_identity', type=float, default=0.5,
+                                help='use identity mapping. Setting lambda_identity other than 0 has an effect of '
+                                     'scaling the weight of the identity mapping loss. For example, if the weight of the'
+                                     ' identity loss should be 10 times smaller than the weight of the reconstruction loss, '
+                                     'please set lambda_identity = 0.1')
             '''
             adjust the weight of correlation coefficient loss
             '''
@@ -69,8 +100,7 @@ class CycleGANModel(BaseModel):
         BaseModel.initialize(self, opt)
         self.patch_size = opt.patch_size
         # specify the training losses you want to print out. The program will call base_model.get_current_losses
-        self.loss_names = ['D_A', 'G_A', 'cycle_A', 'idt_A', 'D_B', 'G_B', 'cycle_B', 'idt_B', 'similarity', 'classificaton']
-        # self.loss_names = ['D_A', 'G_A', 'cycle_A', 'cor_coe_GA', 'D_B', 'G_B', 'cycle_B', 'cor_coe_GB']
+        self.loss_names = ['D_A', 'G_A', 'cycle_A', 'idt_A', 'D_B', 'G_B', 'cycle_B', 'idt_B', "sup", 'ssim', 'sbr']
         # specify the images you want to save/display. The program will call base_model.get_current_visuals
         visual_names_A = ['real_A', 'fake_B', 'rec_A']
         visual_names_B = ['real_B', 'fake_A', 'rec_B']
@@ -88,17 +118,20 @@ class CycleGANModel(BaseModel):
         # load/define networks
         # The naming conversion is different from those used in the paper
         # Code (paper): G_A (G), G_B (F), D_A (D_Y), D_B (D_X)
-        self.netG_A = networks3D.define_G(opt.input_nc, opt.output_nc, opt.ngf, opt.netG, opt.norm,   # nc number channels
-                                        not opt.no_dropout, opt.init_type, opt.init_gain, self.gpu_ids)
+        self.netG_A = networks3D.define_G(opt.input_nc, opt.output_nc, opt.ngf, opt.netG, opt.norm,
+                                          # nc number channels
+                                          not opt.no_dropout, opt.init_type, opt.init_gain, self.gpu_ids)
         self.netG_B = networks3D.define_G(opt.output_nc, opt.input_nc, opt.ngf, opt.netG, opt.norm,
-                                        not opt.no_dropout, opt.init_type, opt.init_gain, self.gpu_ids)
+                                          not opt.no_dropout, opt.init_type, opt.init_gain, self.gpu_ids)
 
         if self.isTrain:
             use_sigmoid = opt.no_lsgan
             self.netD_A = networks3D.define_D(opt.output_nc, opt.ndf, opt.netD,
-                                            opt.n_layers_D, opt.norm, use_sigmoid, opt.init_type, opt.init_gain, self.gpu_ids)
+                                              opt.n_layers_D, opt.norm, use_sigmoid, opt.init_type, opt.init_gain,
+                                              self.gpu_ids)
             self.netD_B = networks3D.define_D(opt.input_nc, opt.ndf, opt.netD,
-                                            opt.n_layers_D, opt.norm, use_sigmoid, opt.init_type, opt.init_gain, self.gpu_ids)
+                                              opt.n_layers_D, opt.norm, use_sigmoid, opt.init_type, opt.init_gain,
+                                              self.gpu_ids)
 
         if self.isTrain:
             self.fake_A_pool = ImagePool(opt.pool_size)
@@ -108,8 +141,8 @@ class CycleGANModel(BaseModel):
             self.criterionCycle = torch.nn.L1Loss()
             self.criterionIdt = torch.nn.L1Loss()
             self.L1 = torch.nn.L1Loss()
-            self.L2 = torch.nn.MSELoss()
-            self.BCEwithlogt = torch.nn.BCEWithLogitsLoss()
+            self.sbr_loss = torch.nn.MSELoss()
+            self.torch_ssim = StructuralSimilarityIndexMeasure().cuda()
             # initialize optimizers
             self.optimizer_G = torch.optim.Adam(itertools.chain(self.netG_A.parameters(), self.netG_B.parameters()),
                                                 lr=opt.lr, betas=(opt.beta1, 0.999))
@@ -121,25 +154,25 @@ class CycleGANModel(BaseModel):
 
     def set_input(self, input):
         AtoB = self.opt.which_direction == 'AtoB'
-        self.real_A = input[0 if AtoB else 1].to(self.device)
-        self.real_B = input[1 if AtoB else 0].to(self.device)
+        self.real_A = input[0 if AtoB else 1].to(self.device).to(torch.float16)
+        self.real_B = input[1 if AtoB else 0].to(self.device).to(torch.float16)
         # self.image_paths = input['A_paths' if AtoB else 'B_paths']
 
     def forward(self):
         with torch.cuda.amp.autocast():
-            self.fake_B, self.fake_B_half, self.fake_B_quarter, self.fake_B_cl, self.fake_B_class_feature, self.fake_B_common_feature = self.netG_A(self.real_A)
-            self.rec_A, _, _, _, _, _ = self.netG_B(self.fake_B)
+            self.fake_B = self.netG_A(self.real_A)
+            self.rec_A = self.netG_B(self.fake_B)
 
-            self.fake_A, self.fake_A_half, self.fake_A_quarter, self.fake_A_cl, self.fake_A_class_feature, self.fake_A_common_feature  = self.netG_B(self.real_B)
-            self.rec_B, _, _, _, _, _ = self.netG_A(self.fake_A)
+            self.fake_A = self.netG_B(self.real_B)
+            self.rec_B = self.netG_A(self.fake_A)
 
-    def backward_D_basic(self, netD, real, fake, fake_half, fake_quarter):
+    def backward_D_basic(self, netD, real, fake):
         # Real
         with torch.cuda.amp.autocast():
-            pred_real = netD(real, None, None)
+            pred_real = netD(real)
             loss_D_real = self.criterionGAN(pred_real, True)
             # Fake
-            pred_fake = netD(fake.detach(), fake_half.detach(), fake_quarter.detach())
+            pred_fake = netD(fake.detach())
             loss_D_fake = self.criterionGAN(pred_fake, False)
             # Combined loss
             loss_D = (loss_D_real + loss_D_fake) * 0.5
@@ -151,35 +184,46 @@ class CycleGANModel(BaseModel):
 
     def backward_D_A(self):
         fake_B = self.fake_B_pool.query(self.fake_B)
-        self.loss_D_A = self.backward_D_basic(self.netD_A, self.real_B, fake_B, self.fake_B_half, self.fake_B_quarter)
+        self.loss_D_A = self.backward_D_basic(self.netD_A, self.real_B, fake_B)
 
     def backward_D_B(self):
         fake_A = self.fake_A_pool.query(self.fake_A)
-        self.loss_D_B = self.backward_D_basic(self.netD_B, self.real_A, fake_A, self.fake_A_half, self.fake_A_quarter)
+        self.loss_D_B = self.backward_D_basic(self.netD_B, self.real_A, fake_A)
 
     def backward_G(self):
         lambda_idt = self.opt.lambda_identity
         lambda_A = self.opt.lambda_A
         lambda_B = self.opt.lambda_B
+        '''
+        lambda_coA & lambda_coB
+        '''
+        lambda_co_A = self.opt.lambda_co_A
+        lambda_co_B = self.opt.lambda_co_B
 
         with torch.cuda.amp.autocast():
             # Identity loss
             if lambda_idt > 0:
+
                 # G_A should be identity if real_B is fed.
-                self.idt_A, _, _, _, _, _ = self.netG_A(self.real_B)
+                self.idt_A = self.netG_A(self.real_B)
                 self.loss_idt_A = self.criterionIdt(self.idt_A, self.real_B) * lambda_B * lambda_idt
                 # G_B should be identity if real_A is fed.
-                self.idt_B, _, _, _, _, _ = self.netG_B(self.real_A)
+                self.idt_B = self.netG_B(self.real_A)
                 self.loss_idt_B = self.criterionIdt(self.idt_B, self.real_A) * lambda_A * lambda_idt
             else:
                 self.loss_idt_A = 0
                 self.loss_idt_B = 0
+            # self.loss_idt_A = 0
+            # self.loss_idt_B = 0
+            self.loss_ssim = (1 - self.torch_ssim(self.real_B, self.fake_B)) * lambda_A * 0.5
+
+            # self.loss_sbr = (self.sbr_loss(calculate_sbr(self.fake_B), calculate_sbr(self.real_B)) * lambda_A * 0.3).to(self.device)
 
             # GAN loss D_A(G_A(A))
-            self.loss_G_A = self.criterionGAN(self.netD_A(self.fake_B, None, None), True)
+            self.loss_G_A = self.criterionGAN(self.netD_A(self.fake_B), True)
 
             # GAN loss D_B(G_B(B))
-            self.loss_G_B = self.criterionGAN(self.netD_B(self.fake_A, None, None), True)
+            self.loss_G_B = self.criterionGAN(self.netD_B(self.fake_A), True)
 
             # Forward cycle loss
             self.loss_cycle_A = self.criterionCycle(self.rec_A, self.real_A) * lambda_A
@@ -187,60 +231,22 @@ class CycleGANModel(BaseModel):
             # Backward cycle loss
             self.loss_cycle_B = self.criterionCycle(self.rec_B, self.real_B) * lambda_B
 
-            self.loss_similarity = (self.L2(self.fake_B_common_feature, self.fake_B_class_feature).mean() + self.L2(self.fake_A_common_feature, self.fake_A_class_feature).mean()) * lambda_A * 0.2
+            '''
+            self.cor_coeLoss
+            '''
+            # self.loss_cor_coe_GA = networks3D.Cor_CoeLoss(self.fake_B, self.real_A) * lambda_co_A  # fake ct & real mr; Evaluate the Generator of ct(G_A)
+            # self.loss_cor_coe_GB = networks3D.Cor_CoeLoss(self.fake_A, self.real_B) * lambda_co_B  # fake mr & real ct; Evaluate the Generator of mr(G_B)
 
-            self.loss_classificaton = self.BCEwithlogt(self.fake_B_cl, torch.zeros_like(self.fake_B_cl)) * 2
-            # ------------------------------------------------------------ ---------------------------
-            # ----------------------------------------------------------------------------------------
+            #           self.L1_SPECT = self.L1(self.fake_B, self.real_B) * lambda_B * 0.5
+            #           self.L1_MRI = self.L1(self.fake_A, self.real_A) * lambda_A * 0.5
+            self.loss_sup = self.L1(self.fake_B, self.real_B) * lambda_B * 0.5 \
+                            + self.L1(self.fake_A, self.real_A) * lambda_A * 0.5
+
             # combined loss
-            self.loss_G = self.loss_G_A + self.loss_G_B + self.loss_cycle_A \
-                          + self.loss_cycle_B + self.loss_idt_A + self.loss_idt_B \
-                          + self.loss_similarity + self.loss_classificaton
-
+            self.loss_G = self.loss_G_A + self.loss_G_B + self.loss_cycle_A + self.loss_idt_A + self.loss_idt_B \
+                          + self.loss_cycle_B + self.loss_sup + self.loss_ssim
         scaler.scale(self.loss_G).backward()
-
-
-    def backward_G_pd(self):
-        lambda_idt = self.opt.lambda_identity
-        lambda_A = self.opt.lambda_A
-        lambda_B = self.opt.lambda_B
-
-        with torch.cuda.amp.autocast():
-            # Identity loss
-            if lambda_idt > 0:
-                # G_A should be identity if real_B is fed.
-                self.idt_A, _, _, _, _, _ = self.netG_A(self.real_B)
-                self.loss_idt_A = self.criterionIdt(self.idt_A, self.real_B) * lambda_B * lambda_idt
-                # G_B should be identity if real_A is fed.
-                self.idt_B, _, _, _, _, _ = self.netG_B(self.real_A)
-                self.loss_idt_B = self.criterionIdt(self.idt_B, self.real_A) * lambda_A * lambda_idt
-            else:
-                self.loss_idt_A = 0
-                self.loss_idt_B = 0
-
-            # GAN loss D_A(G_A(A))
-            self.loss_G_A = self.criterionGAN(self.netD_A(self.fake_B, None, None), True)
-
-            # GAN loss D_B(G_B(B))
-            self.loss_G_B = self.criterionGAN(self.netD_B(self.fake_A, None, None), True)
-
-            # Forward cycle loss
-            self.loss_cycle_A = self.criterionCycle(self.rec_A, self.real_A) * lambda_A
-
-            # Backward cycle loss
-            self.loss_cycle_B = self.criterionCycle(self.rec_B, self.real_B) * lambda_B
-
-            self.loss_similarity = (self.L2(self.fake_B_common_feature, self.fake_B_class_feature).mean() + self.L2(self.fake_A_common_feature, self.fake_A_class_feature).mean()) * lambda_A * 0.2
-
-            self.loss_classificaton = self.BCEwithlogt(self.fake_B_cl, torch.ones_like(self.fake_B_cl)) * 2
-            # ------------------------------------------------------------ ---------------------------
-            # ----------------------------------------------------------------------------------------
-            # combined loss
-            self.loss_G = self.loss_G_A + self.loss_G_B + self.loss_cycle_A \
-                          + self.loss_cycle_B + self.loss_idt_A + self.loss_idt_B \
-                          + self.loss_similarity + self.loss_classificaton
-
-        scaler.scale(self.loss_G).backward()
+        # self.loss_G.backward()
 
     def optimize_parameters(self):
         # forward
@@ -248,7 +254,7 @@ class CycleGANModel(BaseModel):
         # G_A and G_B
         self.set_requires_grad([self.netD_A, self.netD_B], False)
         self.optimizer_G.zero_grad()
-        self.backward_G_pd()
+        self.backward_G()
         # self.optimizer_G.step()
 
         scaler.step(self.optimizer_G)
@@ -258,27 +264,26 @@ class CycleGANModel(BaseModel):
         self.optimizer_D.zero_grad()
         self.backward_D_A()
         self.backward_D_B()
+        # self.optimizer_D.step()
 
         scaler.step(self.optimizer_D)
         scaler.update()
 
-    def optimize_parameters_pd(self):
+    def optimize_parameters_netG_mapping(self):
+        self.set_requires_grad([self.netD_A, self.netD_B, self.netG_A, self.netG_B], False)
+        self.set_requires_grad([self.netG_A.mapping, self.netG_B.mapping], True)
+
         # forward
         self.forward()
         # G_A and G_B
-        self.set_requires_grad([self.netD_A, self.netD_B], False)
         self.optimizer_G.zero_grad()
-        self.backward_G_pd()
 
+        self.backward_G()
+        # self.optimizer_G.step()
         scaler.step(self.optimizer_G)
-
-        # D_A and D_B
-        self.set_requires_grad([self.netD_A, self.netD_B], True)
-        self.optimizer_D.zero_grad()
-        self.backward_D_A()
-        self.backward_D_B()
-
-        scaler.step(self.optimizer_D)
         scaler.update()
+        self.set_requires_grad([self.netG_A, self.netG_B], True)
+
+
 
 

@@ -9,15 +9,19 @@ import torch.nn.functional as F
 # opt = TrainOptions().parse()
 import torchvision
 from torchsummary import summary
+
 ###############################################################################
 # Helper Functions
 scaler = torch.cuda.amp.GradScaler()
+
+
 ###############################################################################
 
 class PixelShuffle3d(nn.Module):
     '''
     This class is a 3d version of pixelshuffle.
     '''
+
     def __init__(self, scale):
         '''
         :param scale: upsample scale
@@ -33,11 +37,13 @@ class PixelShuffle3d(nn.Module):
         out_height = in_height * self.scale
         out_width = in_width * self.scale
 
-        input_view = input.contiguous().view(batch_size, nOut, self.scale, self.scale, self.scale, in_depth, in_height, in_width)
+        input_view = input.contiguous().view(batch_size, nOut, self.scale, self.scale, self.scale, in_depth, in_height,
+                                             in_width)
 
         output = input_view.permute(0, 1, 5, 2, 6, 3, 7, 4).contiguous()
 
         return output.view(batch_size, nOut, out_depth, out_height, out_width)
+
 
 def get_norm_layer(norm_type='instance'):
     if norm_type == 'batch':
@@ -54,8 +60,10 @@ def get_norm_layer(norm_type='instance'):
 def get_scheduler(optimizer, opt):
     if opt.lr_policy == 'lambda':
         def lambda_rule(epoch):
-            lr_l = 1.0 - max(0, epoch + 1 + opt.epoch_count - opt.niter) / float(opt.niter_decay + 1)
+            lr_l = 1.0 - (max(0, epoch + 1 + opt.epoch_count - opt.niter) / float(opt.niter_decay + 1)) * 0.6
+            # lr_l = max(lr_l, 0.4)
             return lr_l
+
         scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda_rule)
     elif opt.lr_policy == 'step':
         scheduler = lr_scheduler.StepLR(optimizer, step_size=opt.lr_decay_iters, gamma=0.1)
@@ -94,19 +102,20 @@ def init_weights(net, init_type='normal', gain=0.02):
 
 def init_net(net, init_type='normal', init_gain=0.02, gpu_ids=[]):
     if len(gpu_ids) > 0:
-        assert(torch.cuda.is_available())
+        assert (torch.cuda.is_available())
         net.to(gpu_ids[0])
         net = torch.nn.DataParallel(net, gpu_ids)
     init_weights(net, init_type, gain=init_gain)
     return net
 
 
-def define_G(input_nc, output_nc, ngf, netG, norm='batch', use_dropout=False, init_type='normal', init_gain=0.02, gpu_ids=[]):
+def define_G(input_nc, output_nc, ngf, netG, norm='batch', use_dropout=False, init_type='normal', init_gain=0.02,
+             gpu_ids=[]):
     net = None
     norm_layer = get_norm_layer(norm_type=norm)
 
     if netG == 'resnet_9blocks':
-        net = Parkinson_ResnetGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=9)
+        net = ResnetGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=9)
     elif netG == 'resnet_6blocks':
         net = ResnetGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=6)
     elif netG == 'unet_custom':
@@ -117,6 +126,8 @@ def define_G(input_nc, output_nc, ngf, netG, norm='batch', use_dropout=False, in
         net = UnetGenerator(input_nc, output_nc, 8, ngf, norm_layer=norm_layer, use_dropout=use_dropout)
     elif netG == 'Dynet':
         net = Dynet()
+    elif netG == 'SN_resnet_6blocks':
+        net = ResnetGeneratorSN(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=6)
     else:
         raise NotImplementedError('Generator model name [%s] is not recognized' % netG)
     # summary(netG, input_size=(1, 116, 140, 116))
@@ -131,9 +142,11 @@ def define_D(input_nc, ndf, netD,
     if netD == 'basic':
         net = NLayerDiscriminator(input_nc, ndf, n_layers=3, norm_layer=norm_layer, use_sigmoid=use_sigmoid)
     elif netD == 'n_layers':
-        net = NLayerDiscriminator_multi(input_nc, ndf, n_layers_D, norm_layer=norm_layer, use_sigmoid=use_sigmoid)
+        net = NLayerDiscriminator(input_nc, ndf, n_layers_D, norm_layer=norm_layer, use_sigmoid=use_sigmoid)
     elif netD == 'pixel':
         net = PixelDiscriminator(input_nc, ndf, norm_layer=norm_layer, use_sigmoid=use_sigmoid)
+    elif netD == 'SN_n_layers':
+        net = NLayerDiscriminatorSN(input_nc, ndf, n_layers=3, use_sigmoid=use_sigmoid)
     else:
         raise NotImplementedError('Discriminator model name [%s] is not recognized' % net)
     return init_net(net, init_type, init_gain, gpu_ids)
@@ -154,7 +167,7 @@ class GANLoss(nn.Module):
         self.register_buffer('real_label', torch.tensor(target_real_label))
         self.register_buffer('fake_label', torch.tensor(target_fake_label))
         if use_lsgan:
-            self.loss = nn.MSELoss() #use
+            self.loss = nn.MSELoss()  # use
         else:
             self.loss = nn.BCEWithLogitsLoss()
 
@@ -173,6 +186,8 @@ class GANLoss(nn.Module):
 '''
 define the correlation coefficient loss
 '''
+
+
 def Cor_CoeLoss(y_pred, y_target):
     x = y_pred
     y = y_target
@@ -183,7 +198,7 @@ def Cor_CoeLoss(y_pred, y_target):
     r = r_num / r_den
 
     # return 1 - r  # best are 0
-    return 1 - r**2 # abslute constrain
+    return 1 - r ** 2  # abslute constrain
 
 
 # Defines the generator that consists of Resnet blocks between a few
@@ -210,6 +225,7 @@ class AdaIN3d(nn.Module):
         x = style_scale * x + style_shift
         return x
 
+
 class Interpolate(nn.Module):
     def __init__(self, size, mode):
         super(Interpolate, self).__init__()
@@ -221,6 +237,7 @@ class Interpolate(nn.Module):
         x = self.interp(x, size=self.size, mode=self.mode)
         return x
 
+
 def calc_mean_std(feat, eps=1e-5):
     # eps is a small value added to the variance to avoid divide-by-zero.
     size = feat.size()
@@ -230,6 +247,7 @@ def calc_mean_std(feat, eps=1e-5):
     feat_std = feat_var.sqrt().view(N, C, 1, 1, 1)
     feat_mean = feat.view(N, C, -1).mean(dim=2).view(N, C, 1, 1, 1)
     return feat_mean, feat_std
+
 
 def adaptive_instance_normalization(content_feat, style_scale, style_bias):
     size = content_feat.size()
@@ -241,6 +259,7 @@ def adaptive_instance_normalization(content_feat, style_scale, style_bias):
 
     return normalized_feat * style_scale + style_bias
 
+
 def AdaIN(x, w):
     dim = x.size()[1]
     linear_scale = nn.Linear(512, dim).cuda()
@@ -250,12 +269,14 @@ def AdaIN(x, w):
     x = adaptive_instance_normalization(x.clone(), style_scale, style_bias)
     return x
 
+
 #
 
 
 class ResnetGenerator(nn.Module):
-    def __init__(self, input_nc, output_nc, ngf=64, norm_layer=nn.BatchNorm3d, use_dropout=False, n_blocks=6, padding_type='reflect'):
-        assert(n_blocks >= 0)
+    def __init__(self, input_nc, output_nc, ngf=64, norm_layer=nn.BatchNorm3d, use_dropout=False, n_blocks=6,
+                 padding_type='reflect'):
+        assert (n_blocks >= 0)
         super(ResnetGenerator, self).__init__()
         self.input_nc = input_nc
         self.output_nc = output_nc
@@ -265,13 +286,11 @@ class ResnetGenerator(nn.Module):
             use_bias = norm_layer.func == nn.InstanceNorm3d
         else:
             use_bias = norm_layer == nn.InstanceNorm3d
-
-# ------------------------------------------------ mapping network
         mapping = []
         z_dim = 512
         for i in range(3):
             mapping += [nn.Linear(z_dim, z_dim)]
-            mapping += [nn.LeakyReLU()]
+            mapping += [nn.PReLU()]
 
         model = [nn.ReplicationPad3d(3),
                  nn.Conv3d(input_nc, ngf, kernel_size=7, padding=0,
@@ -287,20 +306,21 @@ class ResnetGenerator(nn.Module):
                       norm_layer(ngf * mult * 2),
                       nn.LeakyReLU(True)]
 
-        mult = 2**n_downsampling
-        subpixel_channel = ngf * mult
-        for i in range(n_blocks):
-            model += [ResnetBlock(ngf * mult, padding_type=padding_type, norm_layer=norm_layer, use_dropout=use_dropout, use_bias=use_bias)]
+        mult = 2 ** n_downsampling
 
+        for i in range(n_blocks):
+            model += [ResnetBlock(ngf * mult, padding_type=padding_type, norm_layer=norm_layer, use_dropout=use_dropout,
+                                  use_bias=use_bias)]
+
+        subpixel_channel = ngf * mult
         # ---------------------------------------------- decoder
         decoder, decoder1, decoder2 = [], [], []
         self.AdaIN_1 = AdaIN3d(z_dim, subpixel_channel)
-
         decoder += [nn.Conv3d(subpixel_channel,
-                              int(subpixel_channel*8),
+                              int(subpixel_channel * 8),
                               kernel_size=1,
                               stride=1, padding=0, bias=use_bias),
-                    norm_layer(int(subpixel_channel*8)),
+                    norm_layer(int(subpixel_channel * 8)),
                     nn.LeakyReLU()]
         decoder += [PixelShuffle3d(2)]
         decoder += [nn.PReLU()]
@@ -311,7 +331,7 @@ class ResnetGenerator(nn.Module):
                               stride=1, padding=1, bias=use_bias),
                     norm_layer(subpixel_channel),
                     nn.LeakyReLU()]
-        channel = int(subpixel_channel/2)
+        channel = int(subpixel_channel / 2)
         decoder += [nn.Conv3d(subpixel_channel,
                               channel,
                               kernel_size=1,
@@ -320,24 +340,23 @@ class ResnetGenerator(nn.Module):
                     nn.LeakyReLU()]
 
         self.AdaIN_2 = AdaIN3d(z_dim, channel)
-
         subpixel_channel = channel
         # ---------------------------------------------------------
         decoder1 += [nn.Conv3d(subpixel_channel,
-                              int(subpixel_channel * 8),
-                              kernel_size=1,
-                              stride=1, padding=0, bias=use_bias),
-                    norm_layer(int(subpixel_channel * 8)),
-                    nn.LeakyReLU()]
+                               int(subpixel_channel * 8),
+                               kernel_size=1,
+                               stride=1, padding=0, bias=use_bias),
+                     norm_layer(int(subpixel_channel * 8)),
+                     nn.LeakyReLU()]
 
         decoder1 += [PixelShuffle3d(2)]
         decoder1 += [nn.PReLU()]
         decoder1 += [nn.Conv3d(subpixel_channel,
-                              subpixel_channel,
-                              kernel_size=3,
-                              stride=1, padding=1, bias=use_bias),
-                    norm_layer(subpixel_channel),
-                    nn.LeakyReLU()]
+                               subpixel_channel,
+                               kernel_size=3,
+                               stride=1, padding=1, bias=use_bias),
+                     norm_layer(subpixel_channel),
+                     nn.LeakyReLU()]
         channel = int(subpixel_channel / 2)
         decoder1 += [nn.Conv3d(subpixel_channel,
                                channel,
@@ -354,8 +373,11 @@ class ResnetGenerator(nn.Module):
 
         self.z_dim = z_dim
         self.mapping = nn.Sequential(*mapping)  # mapping network
-        self.model = nn.Sequential(*model)      # Generator(input -> Resnet)
-        self.decoder = nn.Sequential(*decoder)  # Generator(Resnet -> Output)
+        self.model = nn.Sequential(*model)  # Generator(input -> Resnet)
+        """
+        Generator(Resnet -> Output)
+        """
+        self.decoder = nn.Sequential(*decoder)
         self.decoder1 = nn.Sequential(*decoder1)
         self.decoder2 = nn.Sequential(*decoder2)
 
@@ -364,6 +386,7 @@ class ResnetGenerator(nn.Module):
             z_sample = torch.randn(1, self.z_dim).cuda()
             z_sample = nn.functional.normalize(z_sample)
             w = self.mapping(z_sample)
+            # w1, w2, w3 = torch.split(w, 1)
             x = self.model(input)
             x = self.AdaIN_1(x, w)
             x = self.decoder(x)
@@ -372,169 +395,6 @@ class ResnetGenerator(nn.Module):
             x = self.AdaIN_3(x, w)
             x = self.decoder2(x)
         return x
-
-
-
-class Parkinson_ResnetGenerator(nn.Module):
-    def __init__(self, input_nc, output_nc, ngf=64, norm_layer=nn.BatchNorm3d, use_dropout=False, n_blocks=6, padding_type='reflect'):
-        assert(n_blocks >= 0)
-        super(Parkinson_ResnetGenerator, self).__init__()
-        self.input_nc = input_nc
-        self.output_nc = output_nc
-        self.Parkinson_classification_module = nn.ModuleList()
-
-        self.ngf = ngf
-        if type(norm_layer) == functools.partial:
-            use_bias = norm_layer.func == nn.InstanceNorm3d
-        else:
-            use_bias = norm_layer == nn.InstanceNorm3d
-
-# ------------------------------------------------ mapping network
-        mapping = []
-        z_dim = 512
-        mapping += [nn.Conv3d(ngf * 4, ngf * 8, kernel_size=3, stride=2, padding=1, bias=use_bias), norm_layer(ngf * 8),
-                    nn.LeakyReLU(True)]
-
-        mapping += [nn.Flatten()]
-        mapping += [nn.Linear(ngf * 8 * 8 * 12 * 4, z_dim)]
-
-        for i in range(9):
-            mapping += [nn.Linear(z_dim, z_dim)]
-            mapping += [nn.LeakyReLU()]
-        # ------------------------------------------------ Model(Common Encoding module)
-        model = [nn.ReplicationPad3d(3),
-                 nn.Conv3d(input_nc, ngf, kernel_size=7, padding=0,
-                           bias=use_bias),
-                 norm_layer(ngf),
-                 nn.LeakyReLU(True)]
-
-        n_downsampling = 2
-        for i in range(n_downsampling):
-            mult = 2 ** i
-            model += [nn.Conv3d(ngf * mult, ngf * mult * 2, kernel_size=3,
-                                stride=2, padding=1, bias=use_bias),
-                      norm_layer(ngf * mult * 2),
-                      nn.LeakyReLU(True)]
-        self.model = nn.Sequential(*model)
-
-        mult = 2**n_downsampling
-        subpixel_channel = ngf * mult
-        # ---------------------------------------------- AFE_Module & AdaIN_list
-        self.AFE_Module = nn.ModuleList()
-        self.AdaIN_list = nn.ModuleList()
-        for i in range(n_blocks):
-            model = [ResnetBlock(ngf * mult, padding_type=padding_type, norm_layer=norm_layer, use_dropout=use_dropout,
-                                 use_bias=use_bias)]
-            model = nn.Sequential(*model)
-
-            adain = AdaIN3d(512, ngf * mult)
-
-            self.AFE_Module.append(model)
-            self.AdaIN_list.append(adain)
-
-        # ---------------------------------------------- Decoder(Multiscale SPECT Reconstruction Subnetwork)
-        decoder, decoder1, decoder2 = [], [], []
-        decoder += [nn.Conv3d(subpixel_channel,
-                              int(subpixel_channel*8),
-                              kernel_size=1,
-                              stride=1, padding=0, bias=use_bias),
-                    norm_layer(int(subpixel_channel*8)),
-                    nn.LeakyReLU()]
-        decoder += [PixelShuffle3d(2)]
-        decoder += [nn.PReLU()]
-
-        decoder += [nn.Conv3d(subpixel_channel,
-                              subpixel_channel,
-                              kernel_size=3,
-                              stride=1, padding=1, bias=use_bias),
-                    norm_layer(subpixel_channel),
-                    nn.LeakyReLU()]
-        channel = int(subpixel_channel/2)
-        decoder += [nn.Conv3d(subpixel_channel,
-                              channel,
-                              kernel_size=1,
-                              stride=1, padding=0, bias=use_bias),
-                    norm_layer(channel),
-                    nn.LeakyReLU()]
-        subpixel_channel = channel
-        # ---------------------------------------------------------
-        decoder1 += [nn.Conv3d(subpixel_channel,
-                              int(subpixel_channel * 8),
-                              kernel_size=1,
-                              stride=1, padding=0, bias=use_bias),
-                    norm_layer(int(subpixel_channel * 8)),
-                    nn.LeakyReLU()]
-
-        decoder1 += [PixelShuffle3d(2)]
-        decoder1 += [nn.PReLU()]
-        decoder1 += [nn.Conv3d(subpixel_channel,
-                              subpixel_channel,
-                              kernel_size=3,
-                              stride=1, padding=1, bias=use_bias),
-                    norm_layer(subpixel_channel),
-                    nn.LeakyReLU()]
-        channel = int(subpixel_channel / 2)
-        decoder1 += [nn.Conv3d(subpixel_channel,
-                               channel,
-                               kernel_size=1,
-                               stride=1, padding=0, bias=use_bias),
-                     norm_layer(channel),
-                     nn.LeakyReLU()]
-        decoder2 += [nn.ReplicationPad3d(3)]
-        decoder2 += [nn.Conv3d(channel, output_nc, kernel_size=7, padding=0)]
-        decoder2 += [nn.Tanh()]
-
-        # --------------------------------------------------------- parkinson_classification_module
-
-        parkinson_classification_module = []
-        parkinson_classification_module += [nn.Conv3d(1, ngf, kernel_size=3, stride=1, padding=1, bias=use_bias), norm_layer(ngf), nn.LeakyReLU(True)]
-        parkinson_classification_module = nn.Sequential(*parkinson_classification_module)
-        self.Parkinson_classification_module.append(parkinson_classification_module)
-
-        for i in range(3):
-            mult = 2 ** i
-            parkinson_classification_module = [nn.Conv3d(ngf * mult, ngf * mult * 2, kernel_size=3, stride=2, padding=1, bias=use_bias),
-                                                norm_layer(ngf * mult * 2), nn.LeakyReLU(True)]
-            model = nn.Sequential(*parkinson_classification_module)
-            self.Parkinson_classification_module.append(model)
-
-        parkinson_classification_module = [nn.Conv3d(ngf * mult * 2, 1, kernel_size=3, stride=1, padding=1, bias=use_bias), norm_layer(1), nn.LeakyReLU(True)]
-        model = nn.Sequential(*parkinson_classification_module)
-        self.Parkinson_classification_module.append(model)
-
-
-        self.z_dim = z_dim
-        self.mapping = nn.Sequential(*mapping)  # mapping network
-
-        self.decoder = nn.Sequential(*decoder)  # Generator(Resnet -> Output)
-        self.decoder1 = nn.Sequential(*decoder1)
-        self.decoder2 = nn.Sequential(*decoder2)
-
-
-    def forward(self, input):
-        with torch.cuda.amp.autocast():
-            cl = x = input
-            x_common = self.model(x)
-
-            for i in range(0, 5, 1):
-                cl = self.Parkinson_classification_module[i](cl)
-                if i == 2:
-                    class_feature = cl
-
-            w = self.mapping(x_common)
-
-            x = x_common
-            for j in range(9):
-                x = self.AFE_Module[j](x)
-                x = self.AdaIN_list[j](x, w)
-            x_quarter = x
-            x_half = self.decoder(x_quarter)
-            x = self.decoder1(x_half)
-            x = self.decoder2(x)
-
-        return x, x_half, x_quarter, cl, class_feature, x_common
-
-
 
 
 class ResnetBlock(nn.Module):
@@ -589,18 +449,25 @@ class UnetGenerator(nn.Module):
         super(UnetGenerator, self).__init__()
 
         # construct unet structure
-        unet_block = UnetSkipConnectionBlock(ngf * 8, ngf * 8, input_nc=None, submodule=None, norm_layer=norm_layer, innermost=True)
+        unet_block = UnetSkipConnectionBlock(ngf * 8, ngf * 8, input_nc=None, submodule=None, norm_layer=norm_layer,
+                                             innermost=True)
         for i in range(num_downs - 5):
-            unet_block = UnetSkipConnectionBlock(ngf * 8, ngf * 8, input_nc=None, submodule=unet_block, norm_layer=norm_layer, use_dropout=use_dropout)
-        unet_block = UnetSkipConnectionBlock(ngf * 4, ngf * 8, input_nc=None, submodule=unet_block, norm_layer=norm_layer)
-        unet_block = UnetSkipConnectionBlock(ngf * 2, ngf * 4, input_nc=None, submodule=unet_block, norm_layer=norm_layer)
+            unet_block = UnetSkipConnectionBlock(ngf * 8, ngf * 8, input_nc=None, submodule=unet_block,
+                                                 norm_layer=norm_layer, use_dropout=use_dropout)
+        unet_block = UnetSkipConnectionBlock(ngf * 4, ngf * 8, input_nc=None, submodule=unet_block,
+                                             norm_layer=norm_layer)
+        unet_block = UnetSkipConnectionBlock(ngf * 2, ngf * 4, input_nc=None, submodule=unet_block,
+                                             norm_layer=norm_layer)
         unet_block = UnetSkipConnectionBlock(ngf, ngf * 2, input_nc=None, submodule=unet_block, norm_layer=norm_layer)
-        unet_block = UnetSkipConnectionBlock(output_nc, ngf, input_nc=input_nc, submodule=unet_block, outermost=True, norm_layer=norm_layer)
+        unet_block = UnetSkipConnectionBlock(output_nc, ngf, input_nc=input_nc, submodule=unet_block, outermost=True,
+                                             norm_layer=norm_layer)
 
         self.model = unet_block
 
     def forward(self, input):
-        return self.model(input)
+        with torch.cuda.amp.autocast():
+            x = self.model(input)
+        return x
 
 
 # Defines the submodule with skip connection.
@@ -660,8 +527,7 @@ class UnetSkipConnectionBlock(nn.Module):
 
 
 def Dynet():
-
-    sizes, spacings = [128, 128, 64], (1.5,1.5,1.5)
+    sizes, spacings = [128, 128, 64], (1.5, 1.5, 1.5)
 
     strides, kernels = [], []
 
@@ -713,7 +579,7 @@ class NLayerDiscriminator(nn.Module):
         nf_mult_prev = 1
         for n in range(1, n_layers):
             nf_mult_prev = nf_mult
-            nf_mult = min(2**n, 8)
+            nf_mult = min(2 ** n, 8)
             sequence += [
                 nn.Conv3d(ndf * nf_mult_prev, ndf * nf_mult,
                           kernel_size=kw, stride=2, padding=padw, bias=use_bias),
@@ -722,7 +588,7 @@ class NLayerDiscriminator(nn.Module):
             ]
 
         nf_mult_prev = nf_mult
-        nf_mult = min(2**n_layers, 8)
+        nf_mult = min(2 ** n_layers, 8)
         sequence += [
             nn.Conv3d(ndf * nf_mult_prev, ndf * nf_mult,
                       kernel_size=kw, stride=1, padding=padw, bias=use_bias),
@@ -736,103 +602,11 @@ class NLayerDiscriminator(nn.Module):
         #     sequence += [nn.Sigmoid()]
 
         self.model = nn.Sequential(*sequence)
-        # self.model_half_feature =/
 
     def forward(self, input):
         with torch.cuda.amp.autocast():
             score = self.model(input)
         return score
-
-class NLayerDiscriminator_multi(nn.Module):
-    def __init__(self, input_nc, ndf=64, n_layers=3, norm_layer=nn.BatchNorm3d, use_sigmoid=False):
-        super(NLayerDiscriminator_multi, self).__init__()
-        if type(norm_layer) == functools.partial:
-            use_bias = norm_layer.func == nn.InstanceNorm3d
-        else:
-            use_bias = norm_layer == nn.InstanceNorm3d
-
-        self.dis_1 = nn.ModuleList()
-        self.dis_2 = nn.ModuleList()
-        self.dis_3 = nn.ModuleList()
-        kw = 3
-        padw = 1
-
-
-        sequence = [
-            nn.Conv3d(input_nc, ndf, kernel_size=kw, stride=1, padding=padw),
-            nn.LeakyReLU(0.2, True)
-        ]
-        seq_temp = nn.Sequential(*sequence)
-        self.dis_1.append(seq_temp)
-
-        nf_mult = 1
-        nf_mult_prev = 1
-        for n in range(1, n_layers):
-            nf_mult_prev = nf_mult
-            nf_mult = min(2**n, 8)
-            sequence = [
-                nn.Conv3d(ndf * nf_mult_prev, ndf * nf_mult,
-                          kernel_size=kw, stride=2, padding=padw, bias=use_bias),
-                norm_layer(ndf * nf_mult),
-                nn.LeakyReLU(0.2, True)
-            ]
-            seq_temp = nn.Sequential(*sequence)
-            if n < 2:
-                self.dis_1.append(seq_temp)
-            elif n >= 2:
-                self.dis_1.append(seq_temp)
-                self.dis_2.append(seq_temp)
-
-        nf_mult_prev = nf_mult
-        nf_mult = min(2**n_layers, 8)
-        sequence = [
-            nn.Conv3d(ndf * nf_mult_prev, ndf * nf_mult,
-                      kernel_size=kw, stride=1, padding=padw, bias=use_bias),
-            norm_layer(ndf * nf_mult),
-            nn.LeakyReLU(0.2, True)
-        ]
-        seq_temp = nn.Sequential(*sequence)
-        self.dis_1.append(seq_temp)
-        self.dis_2.append(seq_temp)
-        self.dis_3.append(seq_temp)
-
-        sequence = [nn.Conv3d(ndf * nf_mult, 1, kernel_size=kw, stride=1, padding=padw)]
-        seq_temp = nn.Sequential(*sequence)
-        self.dis_1.append(seq_temp)
-        self.dis_2.append(seq_temp)
-        self.dis_3.append(seq_temp)
-
-
-    def forward(self, input, input_half, input_quarter):
-        with torch.cuda.amp.autocast():
-            x = input
-            for i in range(0, 5):
-                x = self.dis_1[i](x)
-                if i == 1:
-                    feature_half_temp = x
-            score = x
-            # score = self.model(input)
-            # ====================================dis_1
-            if input_half == None:
-                x = feature_half_temp
-            else:
-                x = input_half
-            for i in range(0, 3):
-                x = self.dis_2[i](x)
-                if i == 0:
-                    feature_quarter_temp = x
-            score_half = x
-            # ====================================dis_2
-            if input_quarter == None:
-                x = feature_quarter_temp
-            else:
-                x = input_quarter
-
-            for i in range(0, 2):
-                x = self.dis_3[i](x)
-            score_quarter = x
-            # ====================================dis_3
-        return (score + score_half + score_quarter) / 3
 
 
 class PixelDiscriminator(nn.Module):
@@ -858,3 +632,179 @@ class PixelDiscriminator(nn.Module):
 
     def forward(self, input):
         return self.net(input)
+
+
+class ResnetGeneratorSN(nn.Module):
+    def __init__(self, input_nc, output_nc, ngf=32, norm_layer=nn.BatchNorm3d, use_dropout=False, n_blocks=6,
+                 padding_type='reflect'):
+        assert (n_blocks >= 0)
+        super(ResnetGeneratorSN, self).__init__()
+        self.input_nc = input_nc
+        self.output_nc = output_nc
+        self.ngf = ngf
+        if type(norm_layer) == functools.partial:
+            use_bias = norm_layer.func == nn.InstanceNorm3d
+        else:
+            use_bias = norm_layer == nn.InstanceNorm3d
+
+        model = [nn.ReflectionPad3d(3),
+                 nn.utils.spectral_norm(nn.Conv3d(input_nc, ngf, kernel_size=7, padding=0, bias=use_bias)),
+                 norm_layer(ngf),
+                 nn.ReLU(True)]
+
+        n_downsampling = 2
+        for i in range(n_downsampling):
+            mult = 2 ** i
+            model += [nn.utils.spectral_norm(nn.Conv3d(ngf * mult, ngf * mult * 2, kernel_size=3, stride=2, padding=1,
+                                                       bias=use_bias)),
+                      norm_layer(ngf * mult * 2),
+                      nn.ReLU(True)]
+
+        mult = 2 ** n_downsampling
+        for i in range(n_blocks):
+            model += [ResnetBlockSN(ngf * mult, padding_type=padding_type, norm_layer=norm_layer,
+                                    use_dropout=use_dropout,
+                                    use_bias=use_bias)]
+
+        for i in range(n_downsampling):
+            mult = 2 ** (n_downsampling - i)
+            model += [nn.utils.spectral_norm(nn.ConvTranspose3d(ngf * mult, int(ngf * mult / 2), kernel_size=3,
+                                                                stride=2,
+                                                                padding=1, output_padding=1,
+                                                                bias=use_bias)),
+                      norm_layer(int(ngf * mult / 2)),
+                      nn.ReLU(True)]
+            # if i == 0:
+            #     model += [SelfAttention3d(int(ngf * mult / 2), int(ngf * mult / 2))]
+        model += [nn.ReflectionPad3d(3)]
+        model += [nn.Conv3d(ngf, output_nc, kernel_size=7, padding=0)]
+        model += [nn.Tanh()]
+
+        self.model = nn.Sequential(*model)
+
+    def forward(self, input):
+        with torch.cuda.amp.autocast():
+            return self.model(input)
+
+
+class SelfAttention3d(nn.Module):
+    def __init__(self, in_channels, embed_dim):
+        super(SelfAttention3d, self).__init__()
+        self.in_channels = in_channels
+        self.embed_dim = embed_dim
+
+        self.query_conv = nn.Conv3d(in_channels, embed_dim, kernel_size=1)
+        self.key_conv = nn.Conv3d(in_channels, embed_dim, kernel_size=1)
+        self.value_conv = nn.Conv3d(in_channels, embed_dim, kernel_size=1)
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, x):
+        with torch.cuda.amp.autocast():
+            batch_size, channels, depth, height, width = x.size()
+
+            # Project input x into query, key, and value spaces
+            query = self.query_conv(x).view(batch_size, self.embed_dim, -1)
+            # print("query shape:", query.shape)
+            key = self.key_conv(x).view(batch_size, self.embed_dim, -1)
+            # print("key shape:", key.shape)
+            value = self.value_conv(x).view(batch_size, self.embed_dim, -1)
+            # print("value shape:", value.shape)
+
+            # Compute attention scores
+            attention_scores = torch.bmm(query.permute(0, 2, 1), key)
+            # print("attention_scores shape:", attention_scores.shape)
+            attention_scores = self.softmax(attention_scores)
+
+            # Apply attention to values
+            attended_values = torch.bmm(value, attention_scores)
+
+            # Reshape and return
+            attended_values = attended_values.view(batch_size, self.embed_dim, depth, height, width)
+            return attended_values
+
+
+class NLayerDiscriminatorSN(nn.Module):
+    def __init__(self, input_nc, ndf=32, n_layers=3, use_sigmoid=False):
+        super(NLayerDiscriminatorSN, self).__init__()
+        use_bias = False
+
+        kw = 4
+        padw = 1
+        sequence = [
+            nn.utils.spectral_norm(nn.Conv3d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw)),
+            nn.LeakyReLU(0.2, True)
+        ]
+
+        nf_mult = 1
+        nf_mult_prev = 1
+        for n in range(1, n_layers):
+            nf_mult_prev = nf_mult
+            nf_mult = min(2 ** n, 8)
+            sequence += [
+                nn.utils.spectral_norm(nn.Conv3d(ndf * nf_mult_prev, ndf * nf_mult,
+                                                 kernel_size=kw, stride=2, padding=padw, bias=use_bias)),
+                nn.LeakyReLU(0.2, True)
+            ]
+
+        nf_mult_prev = nf_mult
+        nf_mult = min(2 ** n_layers, 8)
+        sequence += [
+            nn.utils.spectral_norm(nn.Conv3d(ndf * nf_mult_prev, ndf * nf_mult,
+                                             kernel_size=kw, stride=1, padding=padw, bias=use_bias)),
+            nn.LeakyReLU(0.2, True)
+        ]
+
+        sequence += [nn.utils.spectral_norm(nn.Conv3d(ndf * nf_mult, 1, kernel_size=kw, stride=1, padding=padw))]
+
+        if use_sigmoid:
+            sequence += [nn.Sigmoid()]
+
+        self.model = nn.Sequential(*sequence)
+
+    def forward(self, input):
+        with torch.cuda.amp.autocast():
+            return self.model(input)
+
+
+# Define a resnet block
+class ResnetBlockSN(nn.Module):
+    def __init__(self, dim, padding_type, norm_layer, use_dropout, use_bias):
+        super(ResnetBlockSN, self).__init__()
+        self.conv_block = self.build_conv_block(dim, padding_type, norm_layer, use_dropout, use_bias)
+
+    def build_conv_block(self, dim, padding_type, norm_layer, use_dropout, use_bias):
+        conv_block = []
+        p = 0
+        if padding_type == 'reflect':
+            conv_block += [nn.ReflectionPad3d(1)]
+        elif padding_type == 'replicate':
+            conv_block += [nn.ReplicationPad3d(1)]
+        elif padding_type == 'zero':
+            p = 1
+        else:
+            raise NotImplementedError('padding [%s] is not implemented' % padding_type)
+
+        conv_block += [nn.utils.spectral_norm(nn.Conv3d(dim, dim, kernel_size=3, padding=p, bias=use_bias)),
+                       norm_layer(dim),
+                       nn.ReLU(True)]
+        if use_dropout:
+            conv_block += [nn.Dropout(0.5)]
+
+        p = 0
+        if padding_type == 'reflect':
+            conv_block += [nn.ReflectionPad3d(1)]
+        elif padding_type == 'replicate':
+            conv_block += [nn.ReplicationPad3d(1)]
+        elif padding_type == 'zero':
+            p = 1
+        else:
+            raise NotImplementedError('padding [%s] is not implemented' % padding_type)
+        conv_block += [nn.utils.spectral_norm(nn.Conv3d(dim, dim, kernel_size=3, padding=p, bias=use_bias)),
+                       norm_layer(dim)]
+
+        return nn.Sequential(*conv_block)
+
+    def forward(self, x):
+        with torch.cuda.amp.autocast():
+            out = x + self.conv_block(x)
+            return out

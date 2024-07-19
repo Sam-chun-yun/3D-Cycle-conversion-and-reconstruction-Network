@@ -82,7 +82,7 @@ class BaseModel():
         for name in self.loss_names:
             if isinstance(name, str):
                 # float(...) works for both scalar tensor and float number
-                errors_ret[name] = float(getattr(self, 'loss_' + name, 0))
+                errors_ret[name] = float(getattr(self, 'loss_' + name, 30))
         return errors_ret
 
     # save models to the disk
